@@ -59,34 +59,54 @@ def await(coro):
         return result
 
 
-GR_NAMES = {}
-def namegr(name):
-    gr = greenlet.getcurrent()
-    GR_NAMES[id(gr)] = name
-
-namegr('top level')
-
-def grname(gr=None):
-    gr = gr or greenlet.getcurrent()
-    return '%s #%x' % (GR_NAMES.get(id(gr), 'anonymous'), id(gr))
-
-
 class VimLock(object):
-    """Context manager to ensure some vim commands execute atomically.  Upon entering this context
-    manager, the current greenlet will yield to its parent (optionally providing a value) and resume
-    only once the lock is held.  Upon exiting, the greenlet will release the lock, yield again, and
-    resume the computation in the background.
+    """Context manager to ensure a sequence of vim commands executes atomically.  Conceptually,
+    consider a lock that ensures exclusive access to vim's state.  Entering the context will block
+    (make the current greenlet yield) until the lock is acquired.  Exiting the context will release
+    the lock (and yield again).
+
+    In reality, there is no lock.  Exclusivity is ensured by forcing vim to make an `rpcrequest`
+    back to this process.  User input processing is blocked until the `rpcrequest` returns.  The
+    interior of the `with` block runs during the `rpcrequest` handler.
     """
+
+    """
+    Terminology:
+     - "target greenlet": the greenlet running the `with the_vim_lock()` block.
+     - "dispatch greenlet": the greenlet which invokes `the_vim_lock.dispatch(...)`.
+     - "worker greenlet": a greenlet for running background jobs on the event loop.
+     - "event loop": the top-level greenlet where the event loop runs.  This is the parent of the
+       target and dispatch greenlets.
+
+    The general control flow is as follows:
+     1. The target greenlet invokes _enter.
+         a. Schedule _enter handler on worker greenlet 1.
+         b. Switch from target greenlet to event loop.
+     2. Worker greenlet 1 is processed.
+         a. Invoke `vim.eval("rpcrequest(...)")`.
+         b. Switch from worker greenlet 1 to event loop (to await the completion of `vim.eval`).
+     3. Vim sends the `rpcrequest`.  The greenlet handling this request becomes the dispatch
+        greenlet, and invokes `the_vim_lock.dispatch`.
+         a. Switch from dispatch greenlet to target greenlet, passing the dispatch greenlet.
+     4. The target greenlet resumes.  The `with` block finishes running.  The target greenlet
+        invokes _exit.
+         a. Schedule _exit handler on worker greenlet 2.
+         b. Switch from target greenlet to dispatch greenlet.
+     5. The dispatch greenlet returns.  Vim's `rpcrequest` terminates.  Worker greenlet 1 resumes.
+         a. Terminate worker greenlet 1 (nothing left to do).
+     6. Worker greenlet 2 is processed.
+         a. Switch from worker greenlet 2 to the target greenlet.  (Worker greenlet 2 is abandoned.)
+    """
+
     def __init__(self, vim):
         self._vim = vim
         self._next_cookie = 0
         self._pending = {}
 
-    def __call__(self, value=None):
-        print('producing vlc with %r' % value)
-        return VimLockContext(self, value)
+    def __call__(self):
+        return VimLockContext(self)
 
-    def _enter(self, value):
+    def _enter(self):
         cookie = self._next_cookie
         self._next_cookie += 1
 
@@ -95,46 +115,40 @@ class VimLock(object):
 
         vim = self._vim
         def handler():
-            print('begin locked request')
             vim.eval('rpcrequest(%d, "locked", %d)' % (vim.channel_id, cookie))
-            print('end locked request')
 
-        print('schedule lock request for %d' % cookie)
         vim.session.threadsafe_call(handler)
-        print('__enter__ yielding to parent %s' % grname(gr.parent))
-        dispatch_gr = gr.parent.switch(value)
-        print('__enter__ returned from yield with dispatch_gr %s' % grname(dispatch_gr))
+        dispatch_gr = gr.parent.switch()
         return dispatch_gr
+
+    def _exit(self, exc_type, exc_value, traceback, dispatch_gr):
+        gr = greenlet.getcurrent()
+        def handler():
+            if exc_type is not None:
+                gr.throw(exc_type, exc_value, traceback)
+            else:
+                gr.switch()
+
+        self._vim.session.threadsafe_call(handler)
+        dispatch_gr.switch()
 
     def dispatch(self, cookie):
         dispatch_gr = greenlet.getcurrent()
         target_gr = self._pending.pop(cookie)
-        print('dispatch to %s with dispatcher %s' % (grname(target_gr), grname(dispatch_gr)))
         target_gr.switch(dispatch_gr)
 
 class VimLockContext(object):
-    def __init__(self, owner, value):
+    def __init__(self, owner):
         self._owner = owner
-        self._value = value
         self._dispatch_gr = None
 
     def __enter__(self):
-        print('entering vlc!!')
         assert self._dispatch_gr is None, \
                 'VimLockContext is not reentrant'
-        self._dispatch_gr = self._owner._enter(self._value)
+        self._dispatch_gr = self._owner._enter()
 
     def __exit__(self, exc_type, exc_value, traceback):
-        print('exiting vlc!!')
-        gr = greenlet.getcurrent()
-        def handler():
-            gr.switch()
-
-        print('schedule unlocked continuation')
-        self._owner._vim.session.threadsafe_call(handler)
-        print('__exit__ yielding to dispatcher %s' % grname(self._dispatch_gr))
-        self._dispatch_gr.switch()
-        print('__exit__ returned from yield')
+        self._owner._exit(exc_type, exc_value, traceback, self._dispatch_gr)
         self._dispatch_gr = None
         return None
 
@@ -244,33 +258,15 @@ def on_setup():
     coq = Coqtop()
 
 def on_request(cmd, args, **kwargs):
-    namegr('request handler')
     if cmd == 'eval':
         return coq.eval(args[0])
     elif cmd == 'locked':
-        print('enter lock dispatch')
         vim_lock.dispatch(args[0])
-        print('exit lock dispatch')
         return None
-    elif cmd == 'testlock':
-        print('begin')
-        with vim_lock:
-            print('a')
-            print(vim.eval('2'))
-            print('d')
-        print('end')
-        return 17
     raise ValueError('unknown command %r' % cmd)
 
 def on_notify(*args, **kwargs):
-    namegr('notify handler')
     print('got notify: args=%s, kwargs=%s' % (args, kwargs))
-    with vim_lock():
-        print('entered lock!!')
-        print(vim.eval('1'))
-        print(vim.eval('2'))
-        print('exiting lock!!')
-    print('after lock')
 
 
 print('starting...')
