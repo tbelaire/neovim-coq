@@ -8,6 +8,7 @@ from collections import namedtuple
 import greenlet
 import lxml.etree as ET
 import os
+import re
 import sys
 
 import neovim
@@ -241,35 +242,198 @@ class Coqtop(object):
             raise malformed('wrong number of children')
 
         child = xml[0]
-        if child.tag != 'string':
-            raise malformed('expected <string>, not %r' % child.tag)
         if len(child) > 0:
-            raise malformed('unexpected non-text children in <string>')
+            raise malformed('unexpected non-text children in value')
+        if child.tag == 'string':
+            return child.text or ''
+        elif child.tag == 'int':
+            return int(child.text)
+        else:
+            raise malformed('expected value tag, not %r' % child.tag)
 
-        return child.text or ''
-
-    def start_eval(self, cmd):
+    def eval(self, cmd):
         xml = ET.Element('call')
         xml.set('val', 'interp')
         xml.set('id', '0')
-        xml.set('raw', 'true')
+        #xml.set('raw', 'true')
         xml.text = cmd
-
         self.send_raw(xml)
 
-    def eval(self, cmd):
-        self.start_eval(cmd)
         return self.recv_value()
 
-    def start_goals(self):
+    def goals(self):
         xml = ET.Element('call')
         xml.set('val', 'goal')
         self.send_raw(xml)
-
-    def goals(self):
-        self.start_goals()
         return ET.tostring(self.recv_raw())
 
+    def rewind(self, steps):
+        xml = ET.Element('call')
+        xml.set('val', 'rewind')
+        xml.set('steps', str(steps))
+        self.send_raw(xml)
+        return self.recv_value()
+
+
+Token = namedtuple('Token', ['value', 'line', 'col', 'end_line', 'end_col'])
+
+NON_SPACE_RE = re.compile(r'\S')
+COMMENT_OPEN_RE = re.compile(r'\(\*')
+COMMENT_BOUNDARY_RE = re.compile(r'\(\*|\*\)')
+STRING_DELIM_RE = re.compile(r'\\"|"')
+DELIM_RE = re.compile(r'\(\*|"|\.($|\s)')
+BULLET_RE = re.compile(r'[-+*{}]($|\s)')
+
+class Lexer(object):
+    def __init__(self, buf):
+        self._buf = buf
+        self._line = 0
+        self._col = 0
+
+    def pull(self):
+        self.skip_boring()
+        if self.at_eof():
+            return None
+
+        start_line, start_col = self._line, self._col
+        if self.consume(BULLET_RE) is not None:
+            pass
+        else:
+            while True:
+                s = self.consume_until(DELIM_RE)
+                if s is None:
+                    return None
+                elif s == '(*':
+                    self.skip_comment_body()
+                elif s == '"':
+                    self.skip_string_body()
+                elif s.startswith('.'):
+                    # Consume only the actual dot.
+                    self._col -= len(s) - 1
+                    break
+                else:
+                    assert False, 'unreachable: bad delimiter %r' % s
+        end_line, end_col = self._line, self._col
+
+        lines = self._buf[start_line : end_line + 1]
+        if start_line == end_line:
+            value = lines[0][start_col : end_col]
+        else:
+            first = lines[0][start_col:]
+            mid = '\n'.join(lines[1:-1])
+            last = lines[-1][:end_col]
+            value = '%s\n%s\n%s' % (first, mid, last)
+
+        return Token(value, start_line, start_col, end_line, end_col)
+
+    def pull_all(self):
+        result = []
+        while True:
+            token = self.pull()
+            if token is None:
+                break
+            result.append(token)
+        return result
+
+    def pull_until(self, line, col):
+        result = []
+        while True:
+            token = self.pull()
+            if token is None or token.end_line > line or \
+                    (token.end_line == line and token.end_col > col + 1):
+                break
+            result.append(token)
+        return result
+
+    def reset(self):
+        self._line = 0
+        self._col = 0
+
+    def at_eof(self):
+        return self._line >= len(self._buf)
+
+    def consume(self, r):
+        if self._line >= len(self._buf):
+            return None
+
+        line = self._buf[self._line]
+        if self._col >= len(line):
+            return None
+
+        m = r.match(line, self._col)
+        if m is not None:
+            self._col = m.end()
+            return m.group()
+        else:
+            return None
+
+    def consume_until(self, r):
+        # Note that if self._buf is an actual buffer, all operations will require an RPC roundtrip,
+        # so we should avoid extra operations whenever possible.
+        num_lines = len(self._buf)
+        while self._line < num_lines:
+            line = self._buf[self._line]
+            if self._col < len(line):
+                m = r.search(line, self._col)
+                if m is not None:
+                    self._col = m.end()
+                    return m.group()
+            self._line += 1
+            self._col = 0
+        return None
+
+    def lookahead(self, r):
+        s = self.consume(r)
+        if s is not None:
+            self._col -= len(s)
+        return s
+
+    def next(self):
+        if self._line >= len(self._buf):
+            return None
+
+        line = self._buf[self._line]
+        if self._col >= len(line):
+            return None
+
+        return line[self._col]
+
+    def skip_boring(self):
+        '''Skip over boring things like whitespace and comments.'''
+        self.skip_space()
+        while self.consume(COMMENT_OPEN_RE):
+            self.skip_comment_body()
+            self.skip_space()
+
+    def skip_space(self):
+        s = self.consume_until(NON_SPACE_RE)
+        if self._col > 0:
+            self._col -= 1
+        # Otherwise, we are at EOF (col 0 of line `len(buf) + 1`).
+
+    def skip_comment_body(self):
+        depth = 1
+        while depth > 0:
+            s = self.consume_until(COMMENT_BOUNDARY_RE)
+            if s is None:
+                # Reached EOF
+                return
+            elif s == '(*':
+                depth += 1
+            elif s == '*)':
+                depth -= 1
+            else:
+                assert False, 'unreachable: bad comment boundary'
+
+    def skip_string_body(self):
+        while True:
+            s = self.consume_until(STRING_DELIM_RE)
+            if s == '\\"':
+                continue
+            elif s == '"':
+                return
+            else:
+                assert False, 'unreachable: bad string part'
 
 class BufferInfo(object):
     def __init__(self, owner, file_nr, messages_nr, coq):
@@ -278,7 +442,7 @@ class BufferInfo(object):
         self.messages_nr = messages_nr
         self.coq = coq
         self.pending = False
-        print('info: %d %d' % (file_nr, messages_nr))
+        self.cmds = []
 
     def file_buf(self):
         return self.owner.vim.buffers[self.file_nr - 1]
@@ -288,11 +452,48 @@ class BufferInfo(object):
 
     def eval(self, cmd):
         self.start_pending(cmd)
+        try:
+            result = self.coq.eval(cmd)
+            self.cmds.append(cmd)
+            self.finish_pending('===', result.splitlines())
+            return True
+        except CoqtopError as e:
+            self.finish_pending('***', str(e).splitlines())
+            return False
 
-        self.coq.start_eval(cmd)
-        result = self.coq.recv_value()
+    def rewind(self, steps=1):
+        self.start_pending('rewind %d steps' % steps)
+        try:
+            result = self.coq.rewind(steps)
+            if steps > len(self.cmds):
+                self.cmds = []
+            else:
+                self.cmds = self.cmds[:len(self.cmds) - steps]
+            self.finish_pending('===', 'OK')
+            return True
+        except CoqtopError as e:
+            self.finish_pending('***', str(e).splitlines())
+            return False
 
-        self.finish_pending('===', result.splitlines())
+    def eval_to(self, line, col):
+        tokens = Lexer(self.file_buf()[:]).pull_until(line, col)
+        cmds = [t.value for t in tokens]
+        old_cmds = self.cmds
+        i = 0
+        while i < len(cmds) and i < len(old_cmds) and cmds[i] == old_cmds[i]:
+            i += 1
+
+        if i < len(old_cmds):
+            ok = self.rewind(len(old_cmds) - i)
+            if not ok:
+                return False
+
+        for cmd in cmds[i:]:
+            ok = self.eval(cmd)
+            if not ok:
+                return False
+
+        return True
 
     def post_write_msg(self):
         buf = self.messages_buf()
@@ -344,6 +545,8 @@ class Handler(object):
             self.init_for_current_buffer()
         elif cmd == 'eval':
             return self.info().eval(args[0])
+        elif cmd == 'eval_to':
+            return self.info().eval_to(args[0] - 1, args[1] - 1)
         else:
             raise ValueError('unknown notification %r' % cmd)
 
@@ -359,9 +562,12 @@ class Handler(object):
 
     def init_bindings(self):
         vim = self.vim
+        vim.command('command! CoqToHere call rpcnotify(%d, "eval_to", line("."), col("."))' %
+                self.vim.channel_id)
         vim.command('command! -nargs=* Coq call rpcnotify(%d, "eval", <q-args>)' %
                 self.vim.channel_id)
         vim.command('nnoremap CC :Coq ')
+        vim.command('nnoremap CH :CoqToHere<CR>')
 
     def init_for_current_buffer(self):
         vim = self.vim
