@@ -4,6 +4,7 @@ try:
     import asyncio
 except ImportError:
     import trollius as asyncio
+from collections import namedtuple
 import greenlet
 import lxml.etree as ET
 import os
@@ -17,7 +18,7 @@ sys.stderr = log
 
 real_print = print
 def print(*args, **kwargs):
-    real_print(grname() + ':', *args, file=log, **kwargs)
+    real_print(*args, file=log, **kwargs)
 
 
 def make_session():
@@ -57,6 +58,12 @@ def await(coro):
         task.add_done_callback(callback)
         result = gr.parent.switch()
         return result
+
+def defer():
+    gr = greenlet.getcurrent()
+    def handler():
+        gr.switch()
+    asyncio.get_event_loop().call_soon_threadsafe(handler)
 
 
 class VimLock(object):
@@ -179,6 +186,7 @@ class XMLStreamParser(object):
     def feed(self, data):
         self._parser.feed(data)
 
+
 class CoqtopError(Exception):
     pass
 
@@ -240,7 +248,7 @@ class Coqtop(object):
 
         return child.text or ''
 
-    def eval(self, cmd):
+    def start_eval(self, cmd):
         xml = ET.Element('call')
         xml.set('val', 'interp')
         xml.set('id', '0')
@@ -248,25 +256,134 @@ class Coqtop(object):
         xml.text = cmd
 
         self.send_raw(xml)
+
+    def eval(self, cmd):
+        self.start_eval(cmd)
         return self.recv_value()
 
+    def start_goals(self):
+        xml = ET.Element('call')
+        xml.set('val', 'goal')
+        self.send_raw(xml)
 
-coq = None
+    def goals(self):
+        self.start_goals()
+        return ET.tostring(self.recv_raw())
 
-def on_setup():
-    global coq
-    coq = Coqtop()
 
-def on_request(cmd, args, **kwargs):
-    if cmd == 'eval':
-        return coq.eval(args[0])
-    elif cmd == 'locked':
-        vim_lock.dispatch(args[0])
-        return None
-    raise ValueError('unknown command %r' % cmd)
+class BufferInfo(object):
+    def __init__(self, owner, file_nr, messages_nr, coq):
+        self.owner = owner
+        self.file_nr = file_nr
+        self.messages_nr = messages_nr
+        self.coq = coq
+        self.pending = False
+        print('info: %d %d' % (file_nr, messages_nr))
 
-def on_notify(*args, **kwargs):
-    print('got notify: args=%s, kwargs=%s' % (args, kwargs))
+    def file_buf(self):
+        return self.owner.vim.buffers[self.file_nr - 1]
+
+    def messages_buf(self):
+        return self.owner.vim.buffers[self.messages_nr - 1]
+
+    def eval(self, cmd):
+        self.start_pending(cmd)
+
+        self.coq.start_eval(cmd)
+        result = self.coq.recv_value()
+
+        self.finish_pending('===', result.splitlines())
+
+    def post_write_msg(self):
+        buf = self.messages_buf()
+        if len(buf) > 50:
+            buf[50:] = []
+
+        vim = self.owner.vim
+        win_nr = vim.eval('bufwinnr(%d)' % buf.number)
+        if win_nr != -1:
+            vim.windows[win_nr - 1].cursor = (1, 0)
+
+    def start_pending(self, what):
+        if self.pending:
+            raise ValueError('already have a pending command')
+        self.pending = True
+
+        self.messages_buf()[0:0] = [' ... %s' % what, '']
+        self.post_write_msg()
+
+    def finish_pending(self, mark, results):
+        self.pending = False
+
+        buf = self.messages_buf()
+        buf[0] = ' %s %s' % (mark, buf[0][5:])
+        buf[1:1] = results
+        self.post_write_msg()
+
+class Handler(object):
+    def __init__(self, vim):
+        self.vim = vim
+        self.vim_lock = VimLock(vim)
+        self.live_buffers = {}
+
+    def on_setup(self):
+        self.init_bindings()
+
+    def on_request(self, cmd, args):
+        if cmd == 'locked':
+            self.vim_lock.dispatch(args[0])
+        elif cmd == 'init':
+            self.init_for_current_buffer()
+        elif cmd == 'eval':
+            return self.info().eval(args[0])
+        else:
+            raise ValueError('unknown request %r' % cmd)
+
+    def on_notify(self, cmd, args):
+        if cmd == 'init':
+            self.init_for_current_buffer()
+        elif cmd == 'eval':
+            return self.info().eval(args[0])
+        else:
+            raise ValueError('unknown notification %r' % cmd)
+
+    def run(self):
+        self.vim.session.run(self.on_request, self.on_notify, self.on_setup)
+
+    def info(self):
+        nr = self.vim.current.buffer.number
+        if nr not in self.live_buffers:
+            self.init_for_current_buffer()
+            #defer()
+        return self.live_buffers[nr]
+
+    def init_bindings(self):
+        vim = self.vim
+        vim.command('command! -nargs=* Coq call rpcnotify(%d, "eval", <q-args>)' %
+                self.vim.channel_id)
+        vim.command('nnoremap CC :Coq ')
+
+    def init_for_current_buffer(self):
+        vim = self.vim
+
+        buf = vim.current.buffer
+        old_win = vim.eval('winnr()')
+
+        vim.command("rightbelow vertical new Messages\ \(%s\)" % buf.name)
+        messages_buf = vim.current.buffer
+        messages_buf.options['buftype'] = 'nofile'
+        messages_buf.options['swapfile'] = False
+        messages_buf.options['buflisted'] = False
+
+        vim.command('%dwincmd w' % old_win)
+
+        coq = Coqtop()
+
+        info = BufferInfo(self, buf.number, messages_buf.number, coq)
+        assert buf.number not in self.live_buffers
+        self.live_buffers[buf.number] = info
+        assert messages_buf.number not in self.live_buffers
+        self.live_buffers[messages_buf.number] = info
 
 
 print('starting...')
@@ -274,8 +391,6 @@ loop, session = make_session()
 vim = neovim.Nvim.from_session(session)
 asyncio.set_event_loop(loop._loop)
 
-vim_lock = VimLock(vim)
-
-vim.session.run(on_request, on_notify, on_setup)
+Handler(vim).run()
 
 print('stopped')
