@@ -192,6 +192,9 @@ class XMLStreamParser(object):
 class CoqtopError(Exception):
     pass
 
+Goals = namedtuple('Goals', ['fg', 'bg'])
+Goal = namedtuple('Goal', ['context', 'goal'])
+
 class Coqtop(object):
     def __init__(self, args=['coqtop', '-ideslave']):
         from subprocess import PIPE
@@ -225,7 +228,7 @@ class Coqtop(object):
     def _handle_response(self, xml):
         self._response_buf.append(xml)
 
-    def recv_value(self):
+    def recv_value(self, parse=lambda x: x):
         def malformed(why):
             return ValueError('malformed response (%s): %r' % (why, ET.tostring(xml)))
 
@@ -243,37 +246,76 @@ class Coqtop(object):
             raise malformed('wrong number of children')
 
         child = xml[0]
-        if len(child) > 0:
-            raise malformed('unexpected non-text children in value')
-        if child.tag == 'string':
-            return child.text or ''
-        elif child.tag == 'int':
-            return int(child.text)
-        else:
-            raise malformed('expected value tag, not %r' % child.tag)
+        return parse(child)
 
-    def eval(self, cmd):
+    def eval(self, cmd, raw=True):
         xml = ET.Element('call')
         xml.set('val', 'interp')
         xml.set('id', '0')
-        #xml.set('raw', 'true')
+        if raw:
+            xml.set('raw', 'true')
         xml.text = cmd
         self.send_raw(xml)
 
-        return self.recv_value()
+        return self.recv_value(parse_string)
 
     def goals(self):
         xml = ET.Element('call')
         xml.set('val', 'goal')
         self.send_raw(xml)
-        return ET.tostring(self.recv_raw())
+        return self.recv_value(mk_parse_option(parse_goals))
 
     def rewind(self, steps):
         xml = ET.Element('call')
         xml.set('val', 'rewind')
         xml.set('steps', str(steps))
         self.send_raw(xml)
-        return self.recv_value()
+        return self.recv_value(parse_int)
+
+def parse_string(xml):
+    assert xml.tag == 'string'
+    assert len(xml) == 0
+    return xml.text or ''
+
+def parse_int(xml):
+    assert xml.tag == 'int'
+    assert len(xml) == 0
+    return int(xml.text or '0')
+
+def mk_parse_option(parser):
+    def parse_option(xml):
+        assert xml.tag == 'option'
+        val = xml.get('val')
+        if val == 'some':
+            assert len(xml) == 1
+            return parser(xml[0])
+        elif val == 'none':
+            return None
+        else:
+            assert False, 'bad option variant %r' % (val,)
+    return parse_option
+
+def mk_parse_list(parser):
+    def parse_list(xml):
+        assert xml.tag == 'list'
+        return [parser(child) for child in xml]
+    return parse_list
+
+def parse_goals(xml):
+    assert xml.tag == 'goals'
+    assert len(xml) == 2
+    fg = mk_parse_list(parse_goal)(xml[0])
+    # TODO - this part contains <pair> tags for some reason
+    #bg = mk_parse_list(parse_goal)(xml[1])
+    bg = []
+    return Goals(fg, bg)
+
+def parse_goal(xml):
+    assert xml.tag == 'goal'
+    assert len(xml) == 3
+    context = mk_parse_list(parse_string)(xml[1])
+    goal = parse_string(xml[2])
+    return Goal(context, goal)
 
 
 Token = namedtuple('Token', ['value', 'line', 'col', 'end_line', 'end_col'])
@@ -437,9 +479,10 @@ class Lexer(object):
                 assert False, 'unreachable: bad string part'
 
 class BufferInfo(object):
-    def __init__(self, owner, file_nr, messages_nr, coq):
+    def __init__(self, owner, file_nr, goals_nr, messages_nr, coq):
         self.owner = owner
         self.file_nr = file_nr
+        self.goals_nr = goals_nr
         self.messages_nr = messages_nr
         self.coq = coq
         self.pending = False
@@ -448,15 +491,18 @@ class BufferInfo(object):
     def file_buf(self):
         return self.owner.vim.buffers[self.file_nr - 1]
 
+    def goals_buf(self):
+        return self.owner.vim.buffers[self.goals_nr - 1]
+
     def messages_buf(self):
         return self.owner.vim.buffers[self.messages_nr - 1]
 
-    def eval(self, cmd):
+    def eval(self, cmd, mark='===', raw=True):
         self.start_pending(cmd.replace('\n', ' '))
         try:
-            result = self.coq.eval(cmd)
+            result = self.coq.eval(cmd, raw)
             self.cmds.append(cmd)
-            self.finish_pending('===', result)
+            self.finish_pending('>>>', result)
             return True
         except CoqtopError as e:
             self.finish_pending('***', str(e))
@@ -465,12 +511,14 @@ class BufferInfo(object):
     def rewind(self, steps=1):
         self.start_pending('rewind %d steps' % steps)
         try:
-            result = self.coq.rewind(steps)
-            if steps > len(self.cmds):
+            extra = self.coq.rewind(steps)
+            rewound = steps + extra
+            if rewound > len(self.cmds):
                 self.cmds = []
             else:
-                self.cmds = self.cmds[:len(self.cmds) - steps]
-            self.finish_pending('===', 'OK')
+                self.cmds = self.cmds[:len(self.cmds) - rewound]
+            self.finish_pending('<<<', 'OK%s' %
+                    (' (%d extra steps)' % extra if extra > 0 else ''))
             return True
         except CoqtopError as e:
             self.finish_pending('***', str(e))
@@ -489,12 +537,36 @@ class BufferInfo(object):
             if not ok:
                 return False
 
-        for cmd in cmds[i:]:
-            ok = self.eval(cmd)
+        for cmd in cmds[len(self.cmds):]:
+            ok = self.eval(cmd, '>>>', False)
             if not ok:
                 return False
 
         return True
+
+    def update_goals(self):
+        goals = self.coq.goals()
+        if goals is None:
+            self.goals_buf()[:] = []
+            return
+        if len(goals.fg) == 0:
+            self.goals_buf()[:] = ['No unproven subgoals.']
+            return
+
+        lines = []
+        focus = goals.fg[0]
+
+        for c in focus.context:
+            lines += c.splitlines()
+        lines.append(' -------------------- ')
+        lines += focus.goal.splitlines()
+
+        if len(goals.fg) > 1:
+            lines += ['', '', '%d additional goals:' % (len(goals.fg) - 1)]
+            for other in goals.fg[1:]:
+                lines += other.goal.splitlines()
+
+        self.goals_buf()[:] = lines
 
     def post_write_msg(self):
         buf = self.messages_buf()
@@ -538,10 +610,6 @@ class Handler(object):
         try:
             if cmd == 'locked':
                 self.vim_lock.dispatch(args[0])
-            elif cmd == 'init':
-                self.init_for_current_buffer()
-            elif cmd == 'eval':
-                return self.info().eval(args[0])
             else:
                 raise ValueError('unknown request %r' % cmd)
         except Exception as e:
@@ -551,12 +619,16 @@ class Handler(object):
 
     def on_notify(self, cmd, args):
         try:
-            if cmd == 'init':
-                self.init_for_current_buffer()
-            elif cmd == 'eval':
-                return self.info().eval(args[0])
+            if cmd == 'eval':
+                info = self.info()
+                result = info.eval(args[0])
+                info.update_goals()
+                return result
             elif cmd == 'eval_to':
-                return self.info().eval_to(args[0] - 1, args[1] - 1)
+                info = self.info()
+                result = info.eval_to(args[0] - 1, args[1] - 1)
+                info.update_goals()
+                return result
             else:
                 raise ValueError('unknown notification %r' % cmd)
         except Exception as e:
@@ -588,17 +660,25 @@ class Handler(object):
         buf = vim.current.buffer
         old_win = vim.eval('winnr()')
 
-        vim.command("rightbelow vertical new Messages\ \(%s\)" % buf.name)
+        vim.command("rightbelow vertical new Goals\ \(%s\)" % buf.name)
+        goals_buf = vim.current.buffer
+        goals_buf.options['buftype'] = 'nofile'
+        goals_buf.options['swapfile'] = False
+        goals_buf.options['buflisted'] = False
+        goals_buf[:] = []
+
+        vim.command("rightbelow new Messages\ \(%s\)" % buf.name)
         messages_buf = vim.current.buffer
         messages_buf.options['buftype'] = 'nofile'
         messages_buf.options['swapfile'] = False
         messages_buf.options['buflisted'] = False
+        messages_buf[:] = []
 
         vim.command('%dwincmd w' % old_win)
 
         coq = Coqtop()
 
-        info = BufferInfo(self, buf.number, messages_buf.number, coq)
+        info = BufferInfo(self, buf.number, goals_buf.number, messages_buf.number, coq)
         assert buf.number not in self.live_buffers
         self.live_buffers[buf.number] = info
         assert messages_buf.number not in self.live_buffers
