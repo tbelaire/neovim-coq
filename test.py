@@ -10,6 +10,7 @@ import lxml.etree as ET
 import os
 import re
 import sys
+import traceback
 
 import neovim
 
@@ -204,17 +205,17 @@ class Coqtop(object):
 
     def send_raw(self, req):
         msg = ET.tostring(req, encoding='utf-8')
-        print('send: %r' % msg)
+        #print('send: %r' % msg)
         self._to_coq.write(msg)
         await(self._to_coq.drain())
-        print('sent!')
+        #print('sent!')
 
     def recv_raw(self):
         while len(self._response_buf) == 0:
-            print('receiving...')
+            #print('receiving...')
             msg = await(self._from_coq.read(4096))
             assert len(msg) > 0
-            print('recv: %r' % msg)
+            #print('recv: %r' % msg)
             self._parser.feed(msg)
 
         xml = self._response_buf[0]
@@ -320,9 +321,9 @@ class Lexer(object):
             value = lines[0][start_col : end_col]
         else:
             first = lines[0][start_col:]
-            mid = '\n'.join(lines[1:-1])
+            mid = lines[1:-1]
             last = lines[-1][:end_col]
-            value = '%s\n%s\n%s' % (first, mid, last)
+            value = '\n'.join([first] + mid + [last])
 
         return Token(value, start_line, start_col, end_line, end_col)
 
@@ -451,14 +452,14 @@ class BufferInfo(object):
         return self.owner.vim.buffers[self.messages_nr - 1]
 
     def eval(self, cmd):
-        self.start_pending(cmd)
+        self.start_pending(cmd.replace('\n', ' '))
         try:
             result = self.coq.eval(cmd)
             self.cmds.append(cmd)
-            self.finish_pending('===', result.splitlines())
+            self.finish_pending('===', result)
             return True
         except CoqtopError as e:
-            self.finish_pending('***', str(e).splitlines())
+            self.finish_pending('***', str(e))
             return False
 
     def rewind(self, steps=1):
@@ -472,7 +473,7 @@ class BufferInfo(object):
             self.finish_pending('===', 'OK')
             return True
         except CoqtopError as e:
-            self.finish_pending('***', str(e).splitlines())
+            self.finish_pending('***', str(e))
             return False
 
     def eval_to(self, line, col):
@@ -514,6 +515,9 @@ class BufferInfo(object):
         self.post_write_msg()
 
     def finish_pending(self, mark, results):
+        if not isinstance(results, list):
+            results = results.splitlines()
+
         self.pending = False
 
         buf = self.messages_buf()
@@ -531,24 +535,33 @@ class Handler(object):
         self.init_bindings()
 
     def on_request(self, cmd, args):
-        if cmd == 'locked':
-            self.vim_lock.dispatch(args[0])
-        elif cmd == 'init':
-            self.init_for_current_buffer()
-        elif cmd == 'eval':
-            return self.info().eval(args[0])
-        else:
-            raise ValueError('unknown request %r' % cmd)
+        try:
+            if cmd == 'locked':
+                self.vim_lock.dispatch(args[0])
+            elif cmd == 'init':
+                self.init_for_current_buffer()
+            elif cmd == 'eval':
+                return self.info().eval(args[0])
+            else:
+                raise ValueError('unknown request %r' % cmd)
+        except Exception as e:
+            print('request(%s, %s): %s' % (cmd, args, e))
+            traceback.print_exc(file=log)
+            raise
 
     def on_notify(self, cmd, args):
-        if cmd == 'init':
-            self.init_for_current_buffer()
-        elif cmd == 'eval':
-            return self.info().eval(args[0])
-        elif cmd == 'eval_to':
-            return self.info().eval_to(args[0] - 1, args[1] - 1)
-        else:
-            raise ValueError('unknown notification %r' % cmd)
+        try:
+            if cmd == 'init':
+                self.init_for_current_buffer()
+            elif cmd == 'eval':
+                return self.info().eval(args[0])
+            elif cmd == 'eval_to':
+                return self.info().eval_to(args[0] - 1, args[1] - 1)
+            else:
+                raise ValueError('unknown notification %r' % cmd)
+        except Exception as e:
+            print('notify(%s, %s): %s' % (cmd, args, e))
+            traceback.print_exc(file=log)
 
     def run(self):
         self.vim.session.run(self.on_request, self.on_notify, self.on_setup)
