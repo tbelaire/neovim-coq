@@ -487,6 +487,8 @@ class BufferInfo(object):
         self.coq = coq
         self.pending = False
         self.cmds = []
+        self.dots = []
+        self.lines_added = 0
 
     def file_buf(self):
         return self.owner.vim.buffers[self.file_nr - 1]
@@ -527,6 +529,7 @@ class BufferInfo(object):
     def eval_to(self, line, col):
         tokens = Lexer(self.file_buf()[:]).pull_until(line, col)
         cmds = [t.value for t in tokens]
+        self.dots = [(t.end_line, t.end_col) for t in tokens]
         old_cmds = self.cmds
         i = 0
         while i < len(cmds) and i < len(old_cmds) and cmds[i] == old_cmds[i]:
@@ -543,6 +546,18 @@ class BufferInfo(object):
                 return False
 
         return True
+
+    def jump_to_dot(self):
+        assert len(self.cmds) <= len(self.dots)
+        if len(self.cmds) == 0:
+            return
+
+        (dl, dc) = self.dots[len(self.cmds) - 1]
+
+        vim = self.owner.vim
+        win_nr = vim.eval('bufwinnr(%d)' % self.file_buf().number)
+        if win_nr != -1:
+            vim.windows[win_nr - 1].cursor = (dl + 1, dc - 1)
 
     def update_goals(self):
         goals = self.coq.goals()
@@ -570,13 +585,18 @@ class BufferInfo(object):
 
     def post_write_msg(self):
         buf = self.messages_buf()
-        if len(buf) > 50:
-            buf[50:] = []
+        limit = max(self.lines_added, 500)
+        if len(buf) > limit:
+            buf[limit:] = []
 
         vim = self.owner.vim
         win_nr = vim.eval('bufwinnr(%d)' % buf.number)
         if win_nr != -1:
             vim.windows[win_nr - 1].cursor = (1, 0)
+
+    def reset_limit(self):
+        self.post_write_msg()
+        self.lines_added = 0
 
     def start_pending(self, what):
         if self.pending:
@@ -584,6 +604,7 @@ class BufferInfo(object):
         self.pending = True
 
         self.messages_buf()[0:0] = [' ... %s' % what, '']
+        self.lines_added += 2
         self.post_write_msg()
 
     def finish_pending(self, mark, results):
@@ -595,6 +616,7 @@ class BufferInfo(object):
         buf = self.messages_buf()
         buf[0] = ' %s %s' % (mark, buf[0][5:])
         buf[1:1] = results
+        self.lines_added += 1 + len(results)
         self.post_write_msg()
 
 class Handler(object):
@@ -623,12 +645,17 @@ class Handler(object):
                 info = self.info()
                 result = info.eval(args[0])
                 info.update_goals()
+                info.reset_limit()
                 return result
             elif cmd == 'eval_to':
                 info = self.info()
                 result = info.eval_to(args[0] - 1, args[1] - 1)
                 info.update_goals()
+                info.reset_limit()
                 return result
+            elif cmd == 'jump_to_dot':
+                info = self.info()
+                info.jump_to_dot()
             else:
                 raise ValueError('unknown notification %r' % cmd)
         except Exception as e:
@@ -647,12 +674,21 @@ class Handler(object):
 
     def init_bindings(self):
         vim = self.vim
-        vim.command('command! CoqToHere call rpcnotify(%d, "eval_to", line("."), col("."))' %
-                self.vim.channel_id)
-        vim.command('command! -nargs=* Coq call rpcnotify(%d, "eval", <q-args>)' %
-                self.vim.channel_id)
-        vim.command('nnoremap CC :Coq ')
-        vim.command('nnoremap CH :CoqToHere<CR>')
+        cmds = [
+            'command! CoqToHere call rpcnotify(%d, "eval_to", line("."), col("."))' %
+                self.vim.channel_id,
+            'command! CoqLastDot call rpcnotify(%d, "jump_to_dot", line("."), col("."))' %
+                self.vim.channel_id,
+            'command! -nargs=* Coq call rpcnotify(%d, "eval", <q-args>)' %
+                self.vim.channel_id,
+            'nnoremap CC :Coq ',
+            'nnoremap CH :CoqToHere<CR>',
+            'nnoremap CD :CoqLastDot<CR>',
+            'highlight CheckedByCoq ctermbg=17 guibg=LightGreen',
+            'highlight SentToCoq ctermbg=60 guibg=LimeGreen',
+        ]
+        for cmd in cmds:
+            vim.command(cmd)
 
     def init_for_current_buffer(self):
         vim = self.vim
@@ -685,11 +721,12 @@ class Handler(object):
         self.live_buffers[messages_buf.number] = info
 
 
-print('starting...')
-loop, session = make_session()
-vim = neovim.Nvim.from_session(session)
-asyncio.set_event_loop(loop._loop)
+if __name__ == '__main__':
+    print('starting...')
+    loop, session = make_session()
+    vim = neovim.Nvim.from_session(session)
+    asyncio.set_event_loop(loop._loop)
 
-Handler(vim).run()
+    Handler(vim).run()
 
-print('stopped')
+    print('stopped')
