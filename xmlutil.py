@@ -9,7 +9,11 @@ class XMLStreamParser(object):
 
         self._parser = ET.XMLParser(*args, target=self, **kwargs)
         self._parser.feed('<?xml version="1.0" standalone="yes" ?>')
-        self._parser.feed('<!DOCTYPE coq [ <!ENTITY nbsp " "> ]>')
+        self._parser.feed('<!DOCTYPE coq ['
+                '<!ENTITY nbsp " ">'
+                #'<!ENTITY lt "&#60;">'
+                #'<!ENTITY gt "&#62;">'
+                ']>')
         self._parser.feed('<fakeroot>')
 
     def start(self, tag, attrs):

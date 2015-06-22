@@ -23,6 +23,9 @@ Inr = namedtuple('Inr', ['val'])
 StateId = namedtuple('StateId', ['id'])
 Option = namedtuple('Option', ['val'])
 
+OptionState = namedtuple('OptionState', ['sync', 'depr', 'name', 'value'])
+OptionValue = namedtuple('OptionValue', ['val'])
+
 def parse_response(xml):
     assert xml.tag == 'value'
     if xml.get('val') == 'good':
@@ -66,6 +69,14 @@ def parse_value(xml):
             return Inr(parse_value(xml[0]))
         else:
             assert False, 'expected "in_l" or "in_r" in <union>'
+    elif xml.tag == 'option_state':
+        sync, depr, name, value = map(parse_value, xml)
+        return OptionState(sync, depr, name, value)
+    elif xml.tag == 'option_value':
+        return OptionValue(parse_value(xml[0]))
+
+def parse_error(xml):
+    return ET.tostring(xml)
 
 def build(tag, val=None, children=()):
     attribs = {'val': val} if val is not None else {}
@@ -118,7 +129,9 @@ class Coqtop(object):
     # __init__ must run in a greenlet context so it can wait for the subprocess
     # to start up.
     def __init__(self,
-            args=['/home/stuart/.local/coq/bin/coqtop', '-ideslave', '-main-channel', 'stdfds'],
+            args=['/home/stuart/.local/coq/bin/coqtop', '-ideslave',
+                '-main-channel', 'stdfds',
+                '-async-proofs', 'on'],
             handler=lambda x: None):
             #handler=lambda x: print('unknown: %r' % x.tag)):
         from subprocess import PIPE
@@ -145,20 +158,28 @@ class Coqtop(object):
     def _handle_recv(self, task):
         msg = task.result()
         assert len(msg) > 0
-        print('feed: %r' % msg)
+        #print('feed: %r' % msg)
         self._parser.feed(msg)
         self._do_recv()
 
     def _handle_response(self, xml):
         print('got xml: %r' % ET.tostring(xml))
-        if xml.tag != 'value':
-            return
+        if xml.tag == 'value':
+            self._handle_response_value(xml)
+        elif xml.tag == 'message':
+            self._handle_response_message(xml)
+
+    def _handle_response_value(self, xml):
         resp = parse_response(xml)
 
         gr = self._response_waiters.popleft()
         def callback():
             gr.switch(resp)
         asyncio.get_event_loop().call_soon_threadsafe(callback)
+
+    def _handle_response_message(self, xml):
+        print(parse_value(xml[1]))
+        #print(ET.tostring(xml))
 
     # The higher-level code runs in a greenlet, so it can block for responses.
     def _get_response(self):

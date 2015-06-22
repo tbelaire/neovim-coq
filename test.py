@@ -63,40 +63,37 @@ if __name__ == '__main__':
     handler = vimutil.Handler(vim)
 
     def do_init():
-        from coqtop import *
+        from coqtop import Coqtop, Option
 
         global coq
         coq = Coqtop()
 
+        def add(s, line):
+            r = coq.call('Add', ((line, -1), (s, True)))
+            return r.val[0]
+
         r = coq.call('Init', Option(None))
         s = r.val
 
-        r = coq.call('Add', (('Require Import Arith.', -1), (s, True)))
-        s = r.val[0]
+        s = add(s, 'Require Import Arith.')
+        s = add(s, 'Require Import Omega.')
 
-        r = coq.call('Add', (('Require Import OmegaTactic.', -1), (s, True)))
-        s = r.val[0]
+        s = add(s, 'Theorem math : 1 + 1 = 2.')
+        s = add(s, 'omega.')
+        s = add(s, 'Qed.')
 
-        r = coq.call('Add', (('Require Import Coq.omega.Omega.', -1), (s, True)))
-        s = r.val[0]
+        s = add(s, 'Theorem math2 : 1 + 1 = 2.')
+        s = add(s, 'omega.')
+        s = add(s, 'Qed.')
 
-        r = coq.call('Status', True)
+        coq.call('Query', ('Print math.', s))
+        coq.call('Status', True)
 
-        r = coq.call('Add', (('Theorem two_plus_two : 2 + 2 = 4.', -1), (s, True)))
-        s = r.val[0]
-
-        r = coq.call('Add', (('Proof.', -1), (s, True)))
-        s = r.val[0]
-
-        r = coq.call('Add', (('omega.', -1), (s, True)))
-        s = r.val[0]
-
-        r = coq.call('Add', (('Qed.', -1), (s, True)))
-        s = r.val[0]
-
-        r = coq.call('Status', True)
-
-        r = coq.call('Query', ('Print two_plus_two.', s))
+        #r = coq.call('GetOptions', ())
+        #opts = r.val
+        #print('options:')
+        #for k,v in sorted(opts):
+            #print('  %s (%s): %s' % (' '.join(k), v.name, v.value.val))
 
     handler.add_notify_handler('init', do_init)
 
