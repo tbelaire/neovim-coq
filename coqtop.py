@@ -148,6 +148,8 @@ class Coqtop(object):
         self._parser = XMLStreamParser(self._handle_response, encoding='utf-8')
         self._response_waiters = deque([])
 
+        self._message_handler = None
+
     # The low-level receiver code runs directly on the event loop greenlet,
     # inside an ordinary async callback.
     def _do_recv(self):
@@ -178,8 +180,23 @@ class Coqtop(object):
         asyncio.get_event_loop().call_soon_threadsafe(callback)
 
     def _handle_response_message(self, xml):
-        print(parse_value(xml[1]))
-        #print(ET.tostring(xml))
+        if self._message_handler is None:
+            return
+
+        assert xml[0].tag == 'message_level'
+        level = xml[0].get('val')
+
+        msg = parse_value(xml[1])
+
+        def task():
+            self._message_handler(level, msg)
+        gr = greenlet.greenlet(task)
+        def callback():
+            gr.switch()
+        asyncio.get_event_loop().call_soon_threadsafe(callback)
+
+    def set_message_handler(self, f):
+        self._message_handler = f
 
     # The higher-level code runs in a greenlet, so it can block for responses.
     def _get_response(self):

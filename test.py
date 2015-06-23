@@ -38,6 +38,8 @@ class CoqHandler(vimutil.Handler):
         self.root_state = None
         self.cur_state = None
 
+        self.msg_line = 0
+
         self.add_setup_handler(self.do_setup)
         self.add_notify_handler('open_wins', self.do_open_wins)
         self.add_notify_handler('query', self.do_query)
@@ -92,6 +94,7 @@ class CoqHandler(vimutil.Handler):
 
     def init_coqtop(self):
         self.coq = coqtop.Coqtop()
+        self.coq.set_message_handler(self.handle_message)
 
         r = self.coq.call('Init', coqtop.Option(None))
         assert isinstance(r, coqtop.Ok)
@@ -109,13 +112,28 @@ class CoqHandler(vimutil.Handler):
         desc = re.sub(r'\s+', ' ', msg, flags=re.MULTILINE)
         if len(desc) > 80:
             desc = desc[:77] + '...'
+
         self.messages_buf[0:0] = [' ... %s' % desc, '']
+        self.msg_line = 2
+
         r = self.coq.call('Query', (msg, self.cur_state))
         if isinstance(r, coqtop.Ok):
             self.messages_buf[0] = ' +++ %s' % desc
         else:
             self.messages_buf[0] = ' !!! %s' % desc
+            self.messages_buf[2:2] = r.err.split('\n')
 
+        self.messages_buf[0:0] = ['']
+        self.msg_line = 0
+
+        win_nr = self.vim.eval('bufwinnr(%d)' % self.messages_buf.number)
+        if win_nr != -1:
+            self.vim.windows[win_nr - 1].cursor = (1, 0)
+
+    def handle_message(self, level, msg):
+        l = self.msg_line
+        print(repr(msg.split('\n')))
+        self.messages_buf[l:l] = msg.split('\n')
 
 if __name__ == '__main__':
     import logging

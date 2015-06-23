@@ -33,6 +33,7 @@ def defer():
     def handler():
         gr.switch()
     asyncio.get_event_loop().call_soon_threadsafe(handler)
+    gr.parent.switch()
 
 
 _NAME_MAP = {}
