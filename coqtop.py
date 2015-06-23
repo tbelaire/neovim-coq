@@ -133,7 +133,6 @@ class Coqtop(object):
                 '-main-channel', 'stdfds',
                 '-async-proofs', 'on'],
             handler=lambda x: None):
-            #handler=lambda x: print('unknown: %r' % x.tag)):
         from subprocess import PIPE
         coro = asyncio.create_subprocess_exec(*args,
                 stdin=PIPE,
@@ -160,16 +159,16 @@ class Coqtop(object):
     def _handle_recv(self, task):
         msg = task.result()
         assert len(msg) > 0
-        #print('feed: %r' % msg)
         self._parser.feed(msg)
         self._do_recv()
 
     def _handle_response(self, xml):
-        print('got xml: %r' % ET.tostring(xml))
         if xml.tag == 'value':
             self._handle_response_value(xml)
         elif xml.tag == 'message':
             self._handle_response_message(xml)
+        else:
+            print('unhandled: %r' % ET.tostring(xml))
 
     def _handle_response_value(self, xml):
         resp = parse_response(xml)
@@ -207,9 +206,7 @@ class Coqtop(object):
     def call(self, name, arg):
         xml = encode_call(name, arg)
         msg = ET.tostring(xml, encoding='utf-8')
-        print('send: %r' % msg)
         self._to_coq.write(msg)
         self._to_coq.drain()
         resp = self._get_response()
-        print('recv: %r' % (resp,))
         return resp
