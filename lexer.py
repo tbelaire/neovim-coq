@@ -1,11 +1,19 @@
+from collections import namedtuple
+import re
+
+
 Token = namedtuple('Token', ['value', 'line', 'col', 'end_line', 'end_col'])
 
 NON_SPACE_RE = re.compile(r'\S')
 COMMENT_OPEN_RE = re.compile(r'\(\*')
 COMMENT_BOUNDARY_RE = re.compile(r'\(\*|\*\)')
 STRING_DELIM_RE = re.compile(r'\\"|"')
-DELIM_RE = re.compile(r'\(\*|"|\.($|\s)')
-BULLET_RE = re.compile(r'[-+*{}]($|\s)')
+# Important delimiters that cause changes in parser state: begin comment, begin
+# string, and period followed by space (but not "..", which appears inside some
+# tactic commands)
+DELIM_RE = re.compile(r'\(\*|"|(?<!\.)\.($|\s)')
+# Tactic  bullets, which stand alone as commands.
+BULLET_RE = re.compile(r'([-+*]{1,3}|[{}])($|\s)')
 
 class Lexer(object):
     def __init__(self, buf):
@@ -50,23 +58,19 @@ class Lexer(object):
         return Token(value, start_line, start_col, end_line, end_col)
 
     def pull_all(self):
-        result = []
         while True:
             token = self.pull()
             if token is None:
                 break
-            result.append(token)
-        return result
+            yield token
 
     def pull_until(self, line, col):
-        result = []
         while True:
             token = self.pull()
             if token is None or token.end_line > line or \
                     (token.end_line == line and token.end_col > col + 1):
                 break
-            result.append(token)
-        return result
+            yield token
 
     def reset(self):
         self._line = 0

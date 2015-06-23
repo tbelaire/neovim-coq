@@ -15,7 +15,8 @@ import traceback
 import neovim
 
 import asyncutil
-from coqtop import Coqtop, Option
+import coqtop
+import lexer
 import util
 import vimutil
 
@@ -25,6 +26,95 @@ sys.stderr = log
 print = util.mk_print(__name__)
 
 
+
+class CoqHandler(vimutil.Handler):
+    def __init__(self, *args, **kwargs):
+        super(CoqHandler, self).__init__(*args, **kwargs)
+
+        self.goals_buf = None
+        self.messages_buf = None
+
+        self.coq = None
+        self.root_state = None
+        self.cur_state = None
+
+        self.add_setup_handler(self.do_setup)
+        self.add_notify_handler('open_wins', self.do_open_wins)
+        self.add_notify_handler('query', self.do_query)
+
+    def do_setup(self):
+        self.init_wins()
+        self.init_bindings()
+        self.init_coqtop()
+
+    def init_wins(self):
+        vim = self.vim
+
+        old_win = vim.eval('winnr()')
+
+        vim.command("rightbelow vertical new Coq\ Goals")
+        goals_buf = vim.current.buffer
+        goals_buf.options['buftype'] = 'nofile'
+        goals_buf.options['swapfile'] = False
+        goals_buf.options['buflisted'] = False
+        goals_buf[:] = []
+        self.goals_buf = goals_buf
+
+        vim.command("rightbelow new Coq\ Messages")
+        messages_buf = vim.current.buffer
+        messages_buf.options['buftype'] = 'nofile'
+        messages_buf.options['swapfile'] = False
+        messages_buf.options['buflisted'] = False
+        messages_buf[:] = []
+        self.messages_buf = messages_buf
+
+        vim.command('%dwincmd w' % old_win)
+
+    def init_bindings(self):
+        vim = self.vim
+        cmds = [
+            'command! CoqOpenWins call rpcnotify(%(id)d, "open_wins")',
+            'command! -nargs=* CoqQuery call rpcnotify(%(id)d, "query", <q-args>)',
+            #'command! CoqToHere call rpcnotify(%d, "eval_to", line("."), col("."))' %
+                #vim.channel_id,
+            #'command! CoqLastDot call rpcnotify(%d, "jump_to_dot", line("."), col("."))' %
+                #vim.channel_id,
+            #'command! -nargs=* Coq call rpcnotify(%d, "eval", <q-args>)' %
+                #vim.channel_id,
+            #'nnoremap CC :Coq ',
+            #'nnoremap CH :CoqToHere<CR>',
+            #'nnoremap CD :CoqLastDot<CR>',
+            #'highlight CheckedByCoq ctermbg=17 guibg=LightGreen',
+            #'highlight SentToCoq ctermbg=60 guibg=LimeGreen',
+        ]
+        for cmd in cmds:
+            vim.command(cmd % {'id': vim.channel_id})
+
+    def init_coqtop(self):
+        self.coq = coqtop.Coqtop()
+
+        r = self.coq.call('Init', coqtop.Option(None))
+        assert isinstance(r, coqtop.Ok)
+        self.root_state = r.val
+        self.cur_state = self.root_state
+
+    def do_open_wins(self):
+        vim = self.vim
+        old_win = vim.eval('winnr()')
+        vim.command("rightbelow vertical new Coq\ Goals")
+        vim.command("rightbelow new Coq\ Messages")
+        vim.command('%dwincmd w' % old_win)
+
+    def do_query(self, msg):
+        desc = re.sub(r'\s+', ' ', msg, flags=re.MULTILINE)
+        if len(desc) > 80:
+            desc = desc[:77] + '...'
+        self.messages_buf[0:0] = [' ... %s' % desc, '']
+        r = self.coq.call('Query', (msg, self.cur_state))
+        if isinstance(r, coqtop.Ok):
+            self.messages_buf[0] = ' +++ %s' % desc
+        else:
+            self.messages_buf[0] = ' !!! %s' % desc
 
 
 if __name__ == '__main__':
@@ -60,43 +150,7 @@ if __name__ == '__main__':
 
     asyncutil.set_name('loop')
 
-    handler = vimutil.Handler(vim)
-
-    def do_init():
-        from coqtop import Coqtop, Option
-
-        global coq
-        coq = Coqtop()
-
-        def add(s, line):
-            r = coq.call('Add', ((line, -1), (s, True)))
-            return r.val[0]
-
-        r = coq.call('Init', Option(None))
-        s = r.val
-
-        s = add(s, 'Require Import Arith.')
-        s = add(s, 'Require Import Omega.')
-
-        s = add(s, 'Theorem math : 1 + 1 = 2.')
-        s = add(s, 'omega.')
-        s = add(s, 'Qed.')
-
-        s = add(s, 'Theorem math2 : 1 + 1 = 2.')
-        s = add(s, 'omega.')
-        s = add(s, 'Qed.')
-
-        coq.call('Query', ('Print math.', s))
-        coq.call('Status', True)
-
-        #r = coq.call('GetOptions', ())
-        #opts = r.val
-        #print('options:')
-        #for k,v in sorted(opts):
-            #print('  %s (%s): %s' % (' '.join(k), v.name, v.value.val))
-
-    handler.add_notify_handler('init', do_init)
-
+    handler = CoqHandler(vim)
     handler.run()
 
     print('stopped')
