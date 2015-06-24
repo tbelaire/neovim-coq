@@ -59,6 +59,13 @@ class BufferState(object):
         else:
             return self._cmd_tokens[-1].value
 
+    def cur_pos(self):
+        if len(self._states) == 0:
+            return (0, 0)
+        else:
+            t = self._cmd_tokens[len(self._states) - 1]
+            return (t.end_line, t.end_col)
+
     def cur_state(self):
         if len(self._states) == 0:
             return self._owner.root_state
@@ -78,6 +85,8 @@ class BufferState(object):
             r = self._owner.coq.call('Add', ((cmd, -1), (s, True)))
             print('add(%s): %s' % (cmd, r))
             if isinstance(r, coqtop.Err):
+                print('  got error on command %d: %s' % (i, cmd))
+                self._cmd_tokens = self._cmd_tokens[:len(self._states)]
                 return r
             s = r.val[0]
             self._states.append(s)
@@ -104,6 +113,8 @@ class CoqHandler(vimutil.Handler):
         self.add_notify_handler('open_wins', self.do_open_wins)
         self.add_notify_handler('query', self.do_query)
         self.add_notify_handler('eval_to', self.do_eval_to)
+        self.add_notify_handler('last_dot', self.do_goto_last_dot)
+        self.add_notify_handler('debug', self.do_debug)
 
     def do_setup(self):
         self.init_wins()
@@ -139,13 +150,14 @@ class CoqHandler(vimutil.Handler):
             'command! CoqOpenWins call rpcnotify(%(id)d, "open_wins")',
             'command! -nargs=* CoqQuery call rpcnotify(%(id)d, "query", <q-args>)',
             'command! CoqToHere call rpcnotify(%(id)d, "eval_to", line("."), col("."))',
-            #'command! CoqLastDot call rpcnotify(%d, "jump_to_dot", line("."), col("."))' %
-                #vim.channel_id,
+            'command! CoqLastDot call rpcnotify(%(id)d, "last_dot")',
+            'command! CoqDebug call rpcnotify(%(id)d, "debug")',
             #'command! -nargs=* Coq call rpcnotify(%d, "eval", <q-args>)' %
                 #vim.channel_id,
             #'nnoremap CC :Coq ',
             'nnoremap CH :CoqToHere<CR>',
-            #'nnoremap CD :CoqLastDot<CR>',
+            'nnoremap CD :CoqLastDot<CR>',
+            'nnoremap C? :CoqDebug<CR>',
             #'highlight CheckedByCoq ctermbg=17 guibg=LightGreen',
             #'highlight SentToCoq ctermbg=60 guibg=LimeGreen',
         ]
@@ -168,20 +180,22 @@ class CoqHandler(vimutil.Handler):
         vim.command("rightbelow new Coq\ Messages")
         vim.command('%dwincmd w' % old_win)
 
-    def do_query(self, msg):
-        desc = re.sub(r'\s+', ' ', msg, flags=re.MULTILINE)
-        if len(desc) > 80:
-            desc = desc[:77] + '...'
-
+    def _begin_call(self, desc):
         self.messages_buf[0:0] = [' ... %s' % desc, '']
         self.msg_line = 2
 
-        r = self.coq.call('Query', (msg, self.cur_state))
-        if isinstance(r, coqtop.Ok):
+    def _show_message(self, msg):
+        lines = msg.split('\n')
+        l = self.msg_line
+        self.messages_buf[l:l] = lines
+        self.msg_line += len(lines)
+
+    def _end_call(self, desc, result):
+        if isinstance(result, coqtop.Ok):
             self.messages_buf[0] = ' +++ %s' % desc
         else:
             self.messages_buf[0] = ' !!! %s' % desc
-            self.messages_buf[2:2] = r.err.split('\n')
+            self._show_message(result.err)
 
         self.messages_buf[0:0] = ['']
         self.msg_line = 0
@@ -190,9 +204,17 @@ class CoqHandler(vimutil.Handler):
         if win_nr != -1:
             self.vim.windows[win_nr - 1].cursor = (1, 0)
 
+    def do_query(self, msg):
+        desc = re.sub(r'\s+', ' ', msg, flags=re.MULTILINE)
+        if len(desc) > 80:
+            desc = desc[:77] + '...'
+
+        self._begin_call(desc)
+        r = self.coq.call('Query', (msg, self.cur_state))
+        self._end_call(desc, r)
+
     def handle_message(self, level, msg):
-        l = self.msg_line
-        self.messages_buf[l:l] = msg.split('\n')
+        self._show_message(msg)
 
     def get_buffer_state(self, buf):
         if buf.number not in self.buffer_state:
@@ -212,22 +234,21 @@ class CoqHandler(vimutil.Handler):
                 line,
                 last_cmd)
 
-        self.messages_buf[0:0] = [' ... %s' % desc, '']
-        self.msg_line = 2
-
+        self._begin_call(desc)
         r = bs.advance()
-        if isinstance(r, coqtop.Ok):
-            self.messages_buf[0] = ' >>> %s' % desc
-        else:
-            self.messages_buf[0] = ' !!! %s' % desc
-            self.messages_buf[2:2] = r.err.split('\n')
+        self._end_call(desc, r)
 
-        self.messages_buf[0:0] = ['']
-        self.msg_line = 0
+    def do_goto_last_dot(self):
+        bs = self.get_buffer_state(vim.current.buffer)
+        l, c = bs.cur_pos()
+        vim.current.window.cursor = (l + 1, c)
 
-        win_nr = self.vim.eval('bufwinnr(%d)' % self.messages_buf.number)
-        if win_nr != -1:
-            self.vim.windows[win_nr - 1].cursor = (1, 0)
+    def do_debug(self):
+        bs = self.get_buffer_state(vim.current.buffer)
+        print('Buffer status:\n  %d tokens\n  %d states\n  last command: %r' %
+                (len(bs._cmd_tokens),
+                    len(bs._states),
+                    bs._cmd_tokens[-1]))
 
 
 if __name__ == '__main__':
