@@ -96,7 +96,8 @@ class BufferState(object):
             err_s, msg = r.err
             for i, s in enumerate(self._states):
                 if s == err_s:
-                    t = self._cmd_tokens[i]
+                    # `err_s` is a valid state just before the error.
+                    t = self._cmd_tokens[i + 1]
                     self._error_pos = (t.line, t.col)
             return coqtop.Err(msg)
         else:
