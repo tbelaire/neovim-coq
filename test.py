@@ -34,6 +34,7 @@ class BufferState(object):
         self._lexer = lexer.Lexer(buf)
         self._cmd_tokens = []
         self._states = []
+        self._error_pos = None
 
     def pre_advance(self, line, col):
         self._lexer.reset()
@@ -59,6 +60,9 @@ class BufferState(object):
         else:
             return self._cmd_tokens[-1].value
 
+    def cur_error(self):
+        return self._error_pos
+
     def cur_pos(self):
         if len(self._states) == 0:
             return (0, 0)
@@ -76,22 +80,28 @@ class BufferState(object):
         s = self.cur_state()
 
         r = self._owner.coq.call('Edit_at', s)
-        print('edit_at(%s): %s' % (s, r))
         if isinstance(r, coqtop.Err):
             return r
 
         for i in range(len(self._states), len(self._cmd_tokens)):
             cmd = self._cmd_tokens[i].value
             r = self._owner.coq.call('Add', ((cmd, -1), (s, True)))
-            print('add(%s): %s' % (cmd, r))
             if isinstance(r, coqtop.Err):
-                print('  got error on command %d: %s' % (i, cmd))
-                self._cmd_tokens = self._cmd_tokens[:len(self._states)]
                 return r
             s = r.val[0]
             self._states.append(s)
 
-        return self._owner.coq.call('Status', True)
+        r = self._owner.coq.call('Status', True)
+        if isinstance(r, coqtop.Err):
+            err_s, msg = r.err
+            for i, s in enumerate(self._states):
+                if s == err_s:
+                    t = self._cmd_tokens[i]
+                    self._error_pos = (t.line, t.col)
+            return coqtop.Err(msg)
+        else:
+            self._error_pos = None
+            return r
 
 
 class CoqHandler(vimutil.Handler):
@@ -114,6 +124,7 @@ class CoqHandler(vimutil.Handler):
         self.add_notify_handler('query', self.do_query)
         self.add_notify_handler('eval_to', self.do_eval_to)
         self.add_notify_handler('last_dot', self.do_goto_last_dot)
+        self.add_notify_handler('goto_error', self.do_goto_error)
         self.add_notify_handler('debug', self.do_debug)
 
     def do_setup(self):
@@ -151,12 +162,14 @@ class CoqHandler(vimutil.Handler):
             'command! -nargs=* CoqQuery call rpcnotify(%(id)d, "query", <q-args>)',
             'command! CoqToHere call rpcnotify(%(id)d, "eval_to", line("."), col("."))',
             'command! CoqLastDot call rpcnotify(%(id)d, "last_dot")',
+            'command! CoqError call rpcnotify(%(id)d, "goto_error")',
             'command! CoqDebug call rpcnotify(%(id)d, "debug")',
             #'command! -nargs=* Coq call rpcnotify(%d, "eval", <q-args>)' %
                 #vim.channel_id,
             #'nnoremap CC :Coq ',
             'nnoremap CH :CoqToHere<CR>',
             'nnoremap CD :CoqLastDot<CR>',
+            'nnoremap CE :CoqError<CR>',
             'nnoremap C? :CoqDebug<CR>',
             #'highlight CheckedByCoq ctermbg=17 guibg=LightGreen',
             #'highlight SentToCoq ctermbg=60 guibg=LimeGreen',
@@ -241,6 +254,11 @@ class CoqHandler(vimutil.Handler):
     def do_goto_last_dot(self):
         bs = self.get_buffer_state(vim.current.buffer)
         l, c = bs.cur_pos()
+        vim.current.window.cursor = (l + 1, c)
+
+    def do_goto_error(self):
+        bs = self.get_buffer_state(vim.current.buffer)
+        l, c = bs.cur_error() or bs.cur_pos()
         vim.current.window.cursor = (l + 1, c)
 
     def do_debug(self):
