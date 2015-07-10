@@ -209,7 +209,8 @@ class CoqHandler(vimutil.Handler):
             self.messages_buf[0] = ' +++ %s' % desc
         else:
             self.messages_buf[0] = ' !!! %s' % desc
-            self._show_message(result.err)
+            err = result.err[-1] if isinstance(result.err, tuple) else result.err
+            self._show_message(err)
 
         self.messages_buf[0:0] = ['']
         self.msg_line = 0
@@ -217,6 +218,44 @@ class CoqHandler(vimutil.Handler):
         win_nr = self.vim.eval('bufwinnr(%d)' % self.messages_buf.number)
         if win_nr != -1:
             self.vim.windows[win_nr - 1].cursor = (1, 0)
+
+        self._refresh_goals()
+
+    def _refresh_goals(self):
+        r = self.coq.call('Goal', ())
+        if r.val.val is None:
+            self.goals_buf[:] = ['No goals.']
+            return
+
+        goals = r.val.val
+
+        lines = []
+        if len(goals.fg) > 0:
+            g = goals.fg[0]
+            for h in g.hyp:
+                lines.extend(h.split('\n'))
+            lines.append(' ===')
+            lines.extend(g.ccl.split('\n'))
+
+        if len(goals.fg) > 1:
+            lines.extend(['', ''])
+            lines.append('%d other active goals:' % (len(goals.fg) - 1))
+            for i, g in enumerate(goals.fg[1:]):
+                ccl_lines = g.ccl.split('\n')
+                lines.append(' %3d: %s' % (i + 2, ccl_lines[0]))
+                for i in range(1, len(ccl_lines)):
+                    lines.append('      %s' % (ccl_lines[i]))
+
+        lines.extend([''])
+        if len(goals.bg) > 0:
+            lines.append('%d background goals' % len(goals.bg))
+        if len(goals.shelved) > 0:
+            lines.append('%d shelved goals' % len(goals.shelved))
+        if len(goals.given_up) > 0:
+            lines.append('%d admitted goals' % len(goals.given_up))
+
+        self.goals_buf[:] = lines
+
 
     def do_query(self, msg):
         desc = re.sub(r'\s+', ' ', msg, flags=re.MULTILINE)
@@ -263,11 +302,12 @@ class CoqHandler(vimutil.Handler):
         vim.current.window.cursor = (l + 1, c)
 
     def do_debug(self):
-        bs = self.get_buffer_state(vim.current.buffer)
-        print('Buffer status:\n  %d tokens\n  %d states\n  last command: %r' %
-                (len(bs._cmd_tokens),
-                    len(bs._states),
-                    bs._cmd_tokens[-1]))
+        self._refresh_goals()
+        #bs = self.get_buffer_state(vim.current.buffer)
+        #print('Buffer status:\n  %d tokens\n  %d states\n  last command: %r' %
+        #        (len(bs._cmd_tokens),
+        #            len(bs._states),
+        #            bs._cmd_tokens[-1]))
 
 
 if __name__ == '__main__':

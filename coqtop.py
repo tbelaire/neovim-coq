@@ -26,6 +26,12 @@ Option = namedtuple('Option', ['val'])
 OptionState = namedtuple('OptionState', ['sync', 'depr', 'name', 'value'])
 OptionValue = namedtuple('OptionValue', ['val'])
 
+Status = namedtuple('Status', ['path', 'proofname', 'allproofs', 'proofnum'])
+
+Goals = namedtuple('Goals', ['fg', 'bg', 'shelved', 'given_up'])
+Goal = namedtuple('Goal', ['id', 'hyp', 'ccl'])
+Evar = namedtuple('Evar', ['info'])
+
 def parse_response(xml):
     assert xml.tag == 'value'
     if xml.get('val') == 'good':
@@ -74,6 +80,15 @@ def parse_value(xml):
         return OptionState(sync, depr, name, value)
     elif xml.tag == 'option_value':
         return OptionValue(parse_value(xml[0]))
+    elif xml.tag == 'status':
+        path, proofname, allproofs, proofnum = map(parse_value, xml)
+        return Status(path, proofname, allproofs, proofnum)
+    elif xml.tag == 'goals':
+        return Goals(*map(parse_value, xml))
+    elif xml.tag == 'goal':
+        return Goal(*map(parse_value, xml))
+    elif xml.tag == 'evar':
+        return Evar(*map(parse_value, xml))
 
 def parse_error(xml):
     info = tuple(parse_value(c) for c in xml)
