@@ -190,6 +190,8 @@ class Coqtop(object):
             self._handle_response_value(xml)
         elif xml.tag == 'message':
             self._handle_response_message(xml)
+        elif xml.tag == 'feedback':
+            self._handle_response_feedback(xml)
         else:
             print('unhandled: %r' % ET.tostring(xml))
 
@@ -204,6 +206,25 @@ class Coqtop(object):
     def _handle_response_message(self, xml):
         if self._message_handler is None:
             return
+
+        assert xml[0].tag == 'message_level'
+        level = xml[0].get('val')
+
+        msg = ''.join(xml[1].itertext())
+
+        def task():
+            self._message_handler(level, msg)
+        gr = greenlet.greenlet(task)
+        def callback():
+            gr.switch()
+        asyncio.get_event_loop().call_soon_threadsafe(callback)
+
+    def _handle_response_feedback(self, xml):
+        if self._message_handler is None:
+            return
+
+        #print(ET.tostring(xml))
+        return
 
         assert xml[0].tag == 'message_level'
         level = xml[0].get('val')
