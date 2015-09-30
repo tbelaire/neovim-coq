@@ -85,11 +85,14 @@ def parse_value(xml):
         path, proofname, allproofs, proofnum = map(parse_value, xml)
         return Status(path, proofname, allproofs, proofnum)
     elif xml.tag == 'goals':
+        print(ET.tostring(xml))
         return Goals(*map(parse_value, xml))
     elif xml.tag == 'goal':
         return Goal(*map(parse_value, xml))
     elif xml.tag == 'evar':
         return Evar(*map(parse_value, xml))
+    elif xml.tag == 'xml' or xml.tag == 'richpp':
+        return ''.join(xml.itertext())
 
 def parse_error(xml):
     info = tuple(parse_value(c) for c in xml)
@@ -190,8 +193,6 @@ class Coqtop(object):
             self._handle_response_value(xml)
         elif xml.tag == 'message':
             self._handle_response_message(xml)
-        elif xml.tag == 'feedback':
-            self._handle_response_feedback(xml)
         else:
             print('unhandled: %r' % ET.tostring(xml))
 
@@ -206,25 +207,6 @@ class Coqtop(object):
     def _handle_response_message(self, xml):
         if self._message_handler is None:
             return
-
-        assert xml[0].tag == 'message_level'
-        level = xml[0].get('val')
-
-        msg = ''.join(xml[1].itertext())
-
-        def task():
-            self._message_handler(level, msg)
-        gr = greenlet.greenlet(task)
-        def callback():
-            gr.switch()
-        asyncio.get_event_loop().call_soon_threadsafe(callback)
-
-    def _handle_response_feedback(self, xml):
-        if self._message_handler is None:
-            return
-
-        #print(ET.tostring(xml))
-        return
 
         assert xml[0].tag == 'message_level'
         level = xml[0].get('val')
