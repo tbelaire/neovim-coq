@@ -3,6 +3,7 @@ from __future__ import print_function
 from collections import deque, namedtuple
 import greenlet
 import lxml.etree as ET
+import shlex
 
 from asyncutil import await, asyncio
 import util
@@ -149,7 +150,12 @@ class Coqtop(object):
             args=['/home/stuart/.local/coq/bin/coqtop', '-ideslave',
                 '-main-channel', 'stdfds',
                 '-async-proofs', 'on'],
+            extra_args_file=None,
             handler=lambda x: None):
+        if extra_args_file is not None:
+            with open(extra_args_file, 'r') as f:
+                args = args + shlex.split(f.read())
+
         from subprocess import PIPE
         coro = asyncio.create_subprocess_exec(*args,
                 stdin=PIPE,

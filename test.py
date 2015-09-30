@@ -179,7 +179,8 @@ class CoqHandler(vimutil.Handler):
             vim.command(cmd % {'id': vim.channel_id})
 
     def init_coqtop(self):
-        self.coq = coqtop.Coqtop()
+        extra_args_file = '_CoqProject' if os.path.exists('_CoqProject') else None
+        self.coq = coqtop.Coqtop(extra_args_file=extra_args_file)
         self.coq.set_message_handler(self.handle_message)
 
         r = self.coq.call('Init', coqtop.Option(None))
