@@ -38,6 +38,7 @@ def parse_response(xml):
     if xml.get('val') == 'good':
         return Ok(parse_value(xml[0]))
     elif xml.get('val') == 'fail':
+        print('err: %s' % ET.tostring(xml))
         return Err(parse_error(xml))
     else:
         assert False, 'expected "good" or "fail" in <value>'
@@ -95,9 +96,7 @@ def parse_value(xml):
         return ''.join(xml.itertext())
 
 def parse_error(xml):
-    info = tuple(parse_value(c) for c in xml)
-    text = xml[-1].tail if len(xml) > 0 else xml.text
-    return info + (text or '',)
+    return tuple(parse_value(c) for c in xml)
 
 def build(tag, val=None, children=()):
     attribs = {'val': val} if val is not None else {}
