@@ -149,7 +149,7 @@ class Coqtop(object):
     # __init__ must run in a greenlet context so it can wait for the subprocess
     # to start up.
     def __init__(self,
-            args=['/home/stuart/.local/coq/bin/coqtop', '-ideslave',
+            args=['coqtop', '-ideslave',
                 '-main-channel', 'stdfds',
                 '-async-proofs', 'on'],
             extra_args_file=None,
